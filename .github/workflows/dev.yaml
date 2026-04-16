@@ -8,8 +8,7 @@ on:
 jobs:
   test:
     name: Test
-    runs-on: docker
-    container: reg.h2-invent.com/public-system-design/action-image-golang@sha256:0864befcdf0c36dd43b992f3172829d2d30dd21a46f5baadd9df7625ce005938
+    runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.short-sha.outputs.sha }}
     steps:
@@ -30,7 +29,7 @@ jobs:
 
   docker:
     name: Build Docker Image
-    runs-on: host
+    runs-on: ubuntu-latest
     needs:
       - test
     steps:
