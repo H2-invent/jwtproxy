@@ -25,10 +25,7 @@ jobs:
     needs:
       - test
     outputs:
-      sha: ${{ steps.short-sha.outputs.sha }}
       build_version: ${{ steps.version.outputs.version }}
-      build_valid: ${{ steps.build_valid.outputs.date }}
-      helm_changed: ${{ steps.helm_changed.outputs.helm }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,15 +42,22 @@ jobs:
           change_path: .
           version_format: "${major}.${minor}.${patch}"
 
-      - name: Create tag
+      - name: Download dependencies
         run: |
-          HELM_VERSION=${{ steps.version.outputs.version }}
+          go mod download
 
-          git config --global user.name "${GITHUB_ACTOR}"
-          git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
-          
-          git tag "${{ steps.version.outputs.version }}" -m "[forgejo-action-tag]"
-          git push origin --tags
+      - name: Run Build
+        run: CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo
+
+      - name: Create new Release with semantic-version tag
+        uses: ncipollo/release-action@v1
+        id: create_release
+        with:
+          allowUpdates: true
+          prerelease: false
+          name: Release ${{ steps.version.outputs.version }}
+          tag: ${{ steps.version.outputs.version }}
+          artifacts: jwtproxy
 
   docker:
     name: Container Image
