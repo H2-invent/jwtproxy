@@ -1,0 +1,56 @@
+name: Build and Test
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  test:
+    name: Test
+    runs-on: docker
+    container: reg.h2-invent.com/public-system-design/action-image-golang@sha256:0864befcdf0c36dd43b992f3172829d2d30dd21a46f5baadd9df7625ce005938
+    outputs:
+      sha: ${{ steps.short-sha.outputs.sha }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - uses: https://github.com/benjlevesque/short-sha@v3.0
+      id: short-sha
+      with:
+        length: 6
+
+    - name: Download dependencies
+      run: |
+        go mod download
+
+    - name: Run tests
+      run: go test -race -coverprofile=coverage.out ./...
+
+  docker:
+    name: Build Docker Image
+    runs-on: host
+    needs:
+      - test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: reg.h2-invent.com
+          username: ${{ secrets.HARBOR_REGISTRY_USER }}
+          password: ${{ secrets.HARBOR_REGISTRY_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: |
+            reg.h2-invent.com/meetling-provisioner/go:ci-${{ needs.test.outputs.sha }},
+            reg.h2-invent.com/meetling-provisioner/go:dev
+          build-args: |
+            BUILD_VERSION=dev
+            BUILD_EXPIRES=none
