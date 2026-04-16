@@ -28,7 +28,7 @@ func NewJWTAuthHandler(secret []byte, now func() time.Time, next http.Handler) J
 }
 
 func (h JWTAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	tokenString, err := extractBearerToken(r)
+	tokenString, fromQuery, err := extractToken(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -47,18 +47,39 @@ func (h JWTAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Strip the ?jwt= parameter before forwarding so the backend never sees it.
+	if fromQuery {
+		stripJWTQueryParam(r)
+	}
+
 	h.Next.ServeHTTP(w, r)
 }
 
-// extractBearerToken pulls the raw JWT string out of the Authorization header.
-func extractBearerToken(r *http.Request) (string, error) {
+// extractToken looks for a JWT in this order:
+//  1. Query parameter ?jwt=...
+//  2. Authorization: Bearer ... header
+//
+// Returns the raw token string and a flag indicating whether it came from the query.
+func extractToken(r *http.Request) (token string, fromQuery bool, err error) {
+	if t := r.URL.Query().Get("jwt"); t != "" {
+		return t, true, nil
+	}
+
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return "", errors.New("authorization header missing")
+		return "", false, errors.New("token missing: provide ?jwt=... or Authorization: Bearer <token>")
 	}
 	parts := strings.SplitN(authHeader, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-		return "", errors.New("authorization header must be 'Bearer <token>'")
+		return "", false, errors.New("authorization header must be 'Bearer <token>'")
 	}
-	return strings.TrimSpace(parts[1]), nil
+	return strings.TrimSpace(parts[1]), false, nil
+}
+
+// stripJWTQueryParam removes the jwt query parameter from the request URL
+// so that the upstream backend never receives it.
+func stripJWTQueryParam(r *http.Request) {
+	q := r.URL.Query()
+	q.Del("jwt")
+	r.URL.RawQuery = q.Encode()
 }

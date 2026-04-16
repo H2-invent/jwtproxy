@@ -36,10 +36,10 @@ func TestJWTHandling(t *testing.T) {
 		now                func() time.Time
 	}{
 		{
-			name:               "missing JWT header",
+			name:               "missing token (no header, no query param)",
 			request:            httptest.NewRequest("GET", "/", nil),
 			expectedStatusCode: http.StatusUnauthorized,
-			expectedBody:       "authorization header missing",
+			expectedBody:       "token missing",
 		},
 		{
 			name: "junk format for authorization header",
@@ -52,10 +52,19 @@ func TestJWTHandling(t *testing.T) {
 			expectedBody:       "authorization header must be 'Bearer <token>'",
 		},
 		{
-			name: "invalid JWT",
+			name: "invalid JWT via header",
 			request: func() *http.Request {
 				r := httptest.NewRequest("GET", "/", nil)
 				r.Header.Add("Authorization", "Bearer not.a.jwt")
+				return r
+			}(),
+			expectedStatusCode: http.StatusUnauthorized,
+			expectedBody:       "Unauthorized",
+		},
+		{
+			name: "invalid JWT via query param",
+			request: func() *http.Request {
+				r := httptest.NewRequest("GET", "/?jwt=not.a.jwt", nil)
 				return r
 			}(),
 			expectedStatusCode: http.StatusUnauthorized,
@@ -73,7 +82,7 @@ func TestJWTHandling(t *testing.T) {
 			expectedBody:       "Unauthorized",
 		},
 		{
-			name: "expired token",
+			name: "expired token via header",
 			request: func() *http.Request {
 				r := httptest.NewRequest("GET", "/", nil)
 				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": pastExp}, testSecret)
@@ -84,11 +93,9 @@ func TestJWTHandling(t *testing.T) {
 			expectedBody:       "Unauthorized",
 		},
 		{
-			name: "wrong signing algorithm (RS256 token against HS256 handler)",
+			name: "wrong secret",
 			request: func() *http.Request {
 				r := httptest.NewRequest("GET", "/", nil)
-				// A token signed with a different algorithm header (manually crafted header)
-				// We simply use the wrong secret to trigger signature failure.
 				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": futureExp}, "wrong-secret")
 				r.Header.Add("Authorization", "Bearer "+tok)
 				return r
@@ -96,8 +103,9 @@ func TestJWTHandling(t *testing.T) {
 			expectedStatusCode: http.StatusUnauthorized,
 			expectedBody:       "Unauthorized",
 		},
+		// ── Valid tokens ──────────────────────────────────────────────────────
 		{
-			name: "valid token",
+			name: "valid token via Authorization header",
 			request: func() *http.Request {
 				r := httptest.NewRequest("GET", "/", nil)
 				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": futureExp}, testSecret)
@@ -108,13 +116,39 @@ func TestJWTHandling(t *testing.T) {
 			expectedBody:       "OK",
 			expectedNextCalled: true,
 		},
+		{
+			name: "valid token via ?jwt= query param",
+			request: func() *http.Request {
+				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": futureExp}, testSecret)
+				r := httptest.NewRequest("GET", "/?jwt="+tok, nil)
+				return r
+			}(),
+			expectedStatusCode: http.StatusOK,
+			expectedBody:       "OK",
+			expectedNextCalled: true,
+		},
+		{
+			name: "?jwt= is stripped before forwarding to backend",
+			request: func() *http.Request {
+				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": futureExp}, testSecret)
+				r := httptest.NewRequest("GET", "/path?foo=bar&jwt="+tok, nil)
+				return r
+			}(),
+			expectedStatusCode: http.StatusOK,
+			expectedBody:       "foo=bar", // backend receives only foo=bar, no jwt=
+			expectedNextCalled: true,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			actualNextCalled := false
 			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Write([]byte("OK"))
+				// Echo back the raw query string so we can assert stripping.
+				w.Write([]byte(r.URL.RawQuery))
+				if r.URL.RawQuery == "" {
+					w.Write([]byte("OK"))
+				}
 				actualNextCalled = true
 			})
 
@@ -133,19 +167,13 @@ func TestJWTHandling(t *testing.T) {
 			if test.expectedNextCalled != actualNextCalled {
 				t.Errorf("expected next called %v, but got %v", test.expectedNextCalled, actualNextCalled)
 			}
-
 			if actual.StatusCode != test.expectedStatusCode {
-				t.Errorf("expected status code %v, but got %v", test.expectedStatusCode, actual.StatusCode)
+				t.Errorf("expected status %v, got %v", test.expectedStatusCode, actual.StatusCode)
 			}
-
-			actualBody, err := io.ReadAll(actual.Body)
-			if err != nil {
-				t.Fatalf("failed to read body: %v", err)
-			}
-			if !strings.Contains(string(actualBody), test.expectedBody) {
-				t.Errorf("expected body to contain %q but got %q", test.expectedBody, string(actualBody))
+			body, _ := io.ReadAll(actual.Body)
+			if !strings.Contains(string(body), test.expectedBody) {
+				t.Errorf("expected body to contain %q, got %q", test.expectedBody, string(body))
 			}
 		})
 	}
 }
-
