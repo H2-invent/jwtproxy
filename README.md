@@ -1,181 +1,128 @@
 # Reverse Proxy with JWT Authentication
 
-A reverse proxy which rejects incoming requests which:
+A reverse proxy which validates incoming requests using a shared HMAC secret (HS256).
+Requests are rejected if:
 
-* Don't have an `authorization` HTTP header.
-* Have an `authorization` header which doesn't contain a JWT.
-* Have an `authorization` header which contains an expired or invalid JWT.
-* Have an `authorization` header which contains a JWT which has an unrecognised issuer.
-* Have an `authorization` header which could not be validated using the public key corresponding to the issuer.
+* No token is provided (neither `?token=` query parameter nor `Authorization: Bearer` header).
+* The token is invalid, expired, or signed with the wrong secret.
+* The `path` claim in the token does not exactly match the request path.
 
-## Usage
+## How it works
 
-* Decide on an issuer (`iss`) value to use for each API client.
-   * This is usually a domain, e.g. `example.com`.
-* Get the API consumer to generate a private RSA key, and send you the public key.
-* Setup the proxy to allow requests from the API consumer using environment variables, or command line flags.
-* Get the API consumer to send HTTP requests which set an `authorization` header containing a JWT signed with the private key.
-
-## Generating RSA keys
-
-Generate a private key. (example_private.pem).
-
-```bash
-openssl genrsa -out example_private.pem 2048
+```
+Client  ──→  jwtproxy (port 8080)  ──→  Backend (internal only)
+              │
+              ├─ validate token (HS256 + expiry)
+              ├─ check token path == request path
+              └─ strip ?token= before forwarding
 ```
 
-Extract the public key. (example_public.pem)
+## Token format
 
-```bash
-openssl rsa -in example_private.pem -outform PEM -pubout -out example_public.pem
-```
-
-You start the proxy passing it a map of issuers to public keys as environment variables or a file.
-
-## Minimal JWT
-
-The JWT passed by the client must meet the following criteria:
-
-### Header
-
-The JWT must be signed using the RS256 algorithm.
+Tokens must be signed with **HS256** and contain at minimum:
 
 ```json
 {
-  "alg": "RS256",
-  "typ": "JWT"
+  "exp": 1735689600,
+  "path": "/your/request/path"
 }
 ```
 
-### Payload
+| Claim  | Required | Description |
+|--------|----------|-------------|
+| `exp`  | ✅       | Expiry timestamp (Unix). Expired tokens are always rejected. |
+| `path` | ✅       | The exact request path this token grants access to. |
 
-The payload must contain an issuer agreed between the two parties, and an expiration timestamp.
+The token path must **exactly** match the request path — `/test/abc` and `/test/abc/` are treated as different paths.
 
-```json
-{
-  "iss": "custom_issuer.example.com",
-  "exp": "1504282460"
-}
+## Passing the token
+
+**Option 1 – Query parameter (recommended for browser/Etherpad links):**
+```
+GET /test/abc?token=eyJ...
+```
+The `?token=` parameter is stripped before the request is forwarded to the backend.
+
+**Option 2 – Authorization header:**
+```
+Authorization: Bearer eyJ...
 ```
 
 ## Configuration
 
-Configuration can be provided by command line flags (specified by `-name`) or by environment variables.
+Configuration can be provided via command line flags or environment variables.
 
-### JWTPROXY_REMOTE_URL / -remoteURL
+| Environment variable         | Flag                | Description |
+|------------------------------|---------------------|-------------|
+| `JWTPROXY_SECRET`            | `-secret`           | **Required.** Shared HMAC secret for validating tokens. |
+| `JWTPROXY_REMOTE_URL`        | `-remoteURL`        | **Required.** Backend URL to proxy requests to. |
+| `JWTPROXY_LISTEN_PORT`       | `-port`             | Port to listen on (default: `9090`). |
+| `JWTPROXY_REMOTE_HOST_HEADER`| `-remoteHostHeader` | Override the `Host` header sent to the backend. |
+| `JWTPROXY_HEALTHCHECK_URI`   | `-health`           | Health check endpoint (default: `/health`). |
+| `JWTPROXY_PREFIX`            | `-prefix`           | URL prefix to strip before forwarding, e.g. `/api`. |
 
-The URL to proxy requests to.
+## Running
 
-### JWTPROXY_REMOTE_HOST_HEADER / -remoteHostHeader
-
-The HTTP host header to send to the remote endpoint (useful if the remote endpoint is not using DNS).
-
-### JWTPROXY_LISTEN_PORT / -port
-
-The TCP port to open up the proxy on.
-
-### JWTPROXY_HEALTHCHECK_URI / -health
-
-The location that the proxy should use to respond to health check HTTP requests (defaults to `/health`).
-
-### JWTPROXY_PREFIX / -prefix
-
-The prefix to strip from incoming requests applied to the remote URL, e.g to make incoming HTTP request `/api/user?id=1` map to outgoing HTTP request `/user?id=1`
-
-### JWTPROXY_ISSUER_ / JWTPROXY_PUBLIC_KEY_
-
-It's possible to set issuer to public key maps by using environment variables alone.
-
-To set the issuer "example.com" to a public key, create two environment variables with a matching suffix for the `JWTPROXY_ISSUER_` and `JWTPROXY_PUBLIC_KEY_` keys, e.g.:
-
-```
-JWTPROXY_ISSUER_0=example.com
-JWTPROXY_PUBLIC_KEY_0=-----BEGIN PUBLIC KEY-----MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxFj26fqmulXntc7kCp9tMs6MEQUsk2r16Jd6k+aZSaLBo0dVgP77q1os10gZT4N0gYH6NsbVqP4+wWAUIDiemhpxq986z5mtB/lGvmHmaQcK/bOnEvcLWinHJZIla1m2RF7diN5/WBRNh8CyYMiW+BV/6dngknBtP7bDpnCkYrySaOQtKRvrech1UFRKgQjD8bprrcUmOFWYrmKe2NCxcQs9RhYuACt3Du2Z4VwVWN2xvL5LlZdWK7jLENe3MkOZU5WcwA7n+K/tulqA9uNRv8cRIL/y8BUwUsUoqBiyVZXQUa7BgE82GoTXtv3uqkN/yZxnlEcaJW5BD1nFzuvuyQIDAQAB-----END PUBLIC KEY-----
-```
-
-### JWTPROXY_CONFIG / -keys
-
-The location of a JSON file containing a map of issuers to public keys, e.g.:
+### Command line
 
 ```bash
-JWTPROXY_CONFIG=keys.json
+JWTPROXY_SECRET=my-secret \
+JWTPROXY_REMOTE_URL=http://localhost:9001 \
+JWTPROXY_LISTEN_PORT=8080 \
+./jwtproxy
 ```
 
-JSON does not support newlines, so the public key value will need to have them replaced with \n in JSON, e.g. by `cat dev_pub.pem | tr '\n' '_' | sed 's/_/\\n/g' > dev_pub2.pem`
-
-- keys.json
-```json
-{
-    "example.com": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxFj26fqmulXntc7kCp9t\nMs6MEQUsk2r16Jd6k+aZSaLBo0dVgP77q1os10gZT4N0gYH6NsbVqP4+wWAUIDie\nmhpxq986z5mtB/lGvmHmaQcK/bOnEvcLWinHJZIla1m2RF7diN5/WBRNh8CyYMiW\n+BV/6dngknBtP7bDpnCkYrySaOQtKRvrech1UFRKgQjD8bprrcUmOFWYrmKe2NCx\ncQs9RhYuACt3Du2Z4VwVWN2xvL5LlZdWK7jLENe3MkOZU5WcwA7n+K/tulqA9uNR\nv8cRIL/y8BUwUsUoqBiyVZXQUa7BgE82GoTXtv3uqkN/yZxnlEcaJW5BD1nFzuvu\nyQIDAQAB\n-----END PUBLIC KEY-----"
-}
-```
-
-# Running it
-
-## Command line
+### Docker (standalone)
 
 ```bash
-jwtproxy -remoteURL http://example.com:8080 -keys keys.json
+docker run -p 8080:8080 \
+  -e JWTPROXY_SECRET=my-secret \
+  -e JWTPROXY_REMOTE_URL=http://backend:9001 \
+  -e JWTPROXY_LISTEN_PORT=8080 \
+  ghcr.io/your-org/jwtproxy
 ```
 
-## Docker
+### Docker (bundled with Etherpad)
 
-Or you can run the Docker container, using environment variables to pass in required data. In this case, exposing the linked container 'hopeful_pike'.
+The provided `Dockerfile` extends `etherpad/etherpad` and runs both processes inside one container. Etherpad is bound to `127.0.0.1:9001` (not exposed), jwtproxy listens on `0.0.0.0:8080`.
 
 ```bash
-docker run --link hopeful_pike -p 9090:9090/tcp --rm -e "JWTPROXY_LISTEN_PORT=9090" -e "JWTPROXY_REMOTE_URL=http://hopeful_pike:8080" -v /users/me/keys.json:/keys.json -e "JWTPROXY_CONFIG=keys.json" adrianhesketh/jwtproxy
+docker build -t etherpad-jwt .
+
+docker run -p 8080:8080 \
+  -e JWTPROXY_SECRET=my-secret \
+  -e ADMIN_PASSWORD=etherpad-admin \
+  etherpad-jwt
 ```
 
-# Usage
+## Generating a token
 
-Use `curl` to access your local proxy.
+Using [jwt.io](https://jwt.io) or any JWT library. Example with Python:
+
+```python
+import jwt, time
+
+token = jwt.encode(
+    {"exp": int(time.time()) + 3600, "path": "/p/my-pad"},
+    "my-secret",
+    algorithm="HS256",
+)
+print(token)
+```
+
+Then access the pad:
+```
+https://your-host/p/my-pad?token=eyJ...
+```
+
+## Health check
+
+The proxy responds with HTTP 200 at `/health` (configurable via `JWTPROXY_HEALTHCHECK_URI`). Health check requests bypass token validation.
+
+## Building from source
 
 ```bash
-curl -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOiIxNDg2MzkyMjAwIiwiZXhwIjoiMTU4NjM5MjIwMCIsImlzcyI6ImV4YW1wbGUuY29tIn0.McHwUVbe96y-vaTOExPjANm8e8p0v6I7puPf74SV7Jn-QYprrhLlklnBP4MEF77v0LIBUFKgzpOMfldCONId3ktOFOf0117x9iWG3J-Zf6Ni3HinhA9U1pPU7_OhTtkXacmgats8tLWAqmOz46NeyAmHS_dkvodUUPpcHY-AqQtzM4ql6RZpMDstz5dFJWZh9P0_prPknoI-argt2jn-KGajCOIghcGxNarylq5oX62rT9AavavyWGnJW0zLnP9qtIuChzigU542Nbg7y6_E7FaVA2cPICPuiPehn6vVTKuVil0o2SJgFD2J2HQfxa0iDrc8HzbubMGJcw7Vlpkk0w" http://localhost:9090
+go build -o jwtproxy .
 ```
 
-# Testing
-
-Generate a JWT with an appropriate payload at [jwt.io], or using a library:
-
-* iat
-  * issued at time: The time when the JWT was generated as a Unix timestamp.
-* exp
-  * expiry time: The time when the JWT expires, may be rejected by the server if the difference between exp and iat is too long.
-* iss
-  * the issuer, used to look up the correct public key to use to validate the JWT signature.
-
-```json
-{
-  "iat": "1486392200",
-  "exp": "1586392200",
-  "iss": "example.com"
-}
-```
-
-```
-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOiIxNDg2MzkyMjAwIiwiZXhwIjoiMTU4NjM5MjIwMCIsIm5hbWUiOiJBZHJpYW4gSGVza2V0aCJ9.d45Or2h-lApJ4FK2pKj0ZIRdDTULsNl1z-V3LfQFvno
-```
-
-To sign and validate using the command line (to compare against the Go implementation):
-
-```bash
-# SHA256 hash the data.
-openssl dgst -sha256 -binary data.json > hash.bin
-# base64 encode the hash so that it should match the value of the X-Sha256hash HTTP header.
-openssl base64 -e -in hash.bin -out hash.b64
-
-# Sign the hash.
-openssl rsautl -in hash.bin -inkey private_test.pem -sign -out signature.bin
-# base64 encode the signature so that it should match the value of the X-Signature HTTP header.
-openssl base64 -e -in signature.bin -out signature.b64
-
-# Verify the signature.
-openssl rsautl -in signature.bin -verify -inkey public_test.pem -pubin > verified.bin
-openssl base64 -e -in verified.bin -out verified.b64
-
-# Compare the original hash to the hash created by the verification routine.
-# The two files should be equal.
-cat hash.b64
-cat verified.b64
-```
+Requires Go 1.25+.

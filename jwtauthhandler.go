@@ -47,7 +47,13 @@ func (h JWTAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Strip the ?jwt= parameter before forwarding so the backend never sees it.
+	// Validate the path claim against the actual request path.
+	if err := validatePath(token, r.URL.Path); err != nil {
+		http.Error(w, "Forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	// Strip the ?token= parameter before forwarding so the backend never sees it.
 	if fromQuery {
 		stripJWTQueryParam(r)
 	}
@@ -55,19 +61,44 @@ func (h JWTAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Next.ServeHTTP(w, r)
 }
 
+// validatePath checks that the "path" claim in the token matches the request path.
+// The claim must be present and must exactly match r.URL.Path.
+func validatePath(token *jwt.Token, requestPath string) error {
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return errors.New("invalid token claims")
+	}
+
+	rawPath, ok := claims["path"]
+	if !ok {
+		return errors.New("path claim missing in token")
+	}
+
+	allowedPath, ok := rawPath.(string)
+	if !ok {
+		return errors.New("path claim must be a string")
+	}
+
+	if allowedPath != requestPath {
+		return errors.New("request path does not match token path")
+	}
+
+	return nil
+}
+
 // extractToken looks for a JWT in this order:
-//  1. Query parameter ?jwt=...
+//  1. Query parameter ?token=...
 //  2. Authorization: Bearer ... header
 //
 // Returns the raw token string and a flag indicating whether it came from the query.
 func extractToken(r *http.Request) (token string, fromQuery bool, err error) {
-	if t := r.URL.Query().Get("jwt"); t != "" {
+	if t := r.URL.Query().Get("token"); t != "" {
 		return t, true, nil
 	}
 
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return "", false, errors.New("token missing: provide ?jwt=... or Authorization: Bearer <token>")
+		return "", false, errors.New("token missing: provide ?token=... or Authorization: Bearer <token>")
 	}
 	parts := strings.SplitN(authHeader, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
@@ -80,6 +111,6 @@ func extractToken(r *http.Request) (token string, fromQuery bool, err error) {
 // so that the upstream backend never receives it.
 func stripJWTQueryParam(r *http.Request) {
 	q := r.URL.Query()
-	q.Del("jwt")
+	q.Del("token")
 	r.URL.RawQuery = q.Encode()
 }

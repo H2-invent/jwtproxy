@@ -33,18 +33,18 @@ func TestJWTHandling(t *testing.T) {
 		expectedStatusCode int
 		expectedBody       string
 		expectedNextCalled bool
-		now                func() time.Time
 	}{
+		// ── Token extraction errors ───────────────────────────────────────────
 		{
 			name:               "missing token (no header, no query param)",
-			request:            httptest.NewRequest("GET", "/", nil),
+			request:            httptest.NewRequest("GET", "/test/abc", nil),
 			expectedStatusCode: http.StatusUnauthorized,
 			expectedBody:       "token missing",
 		},
 		{
 			name: "junk format for authorization header",
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/", nil)
+				r := httptest.NewRequest("GET", "/test/abc", nil)
 				r.Header.Add("Authorization", "nonsense")
 				return r
 			}(),
@@ -54,7 +54,7 @@ func TestJWTHandling(t *testing.T) {
 		{
 			name: "invalid JWT via header",
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/", nil)
+				r := httptest.NewRequest("GET", "/test/abc", nil)
 				r.Header.Add("Authorization", "Bearer not.a.jwt")
 				return r
 			}(),
@@ -64,8 +64,7 @@ func TestJWTHandling(t *testing.T) {
 		{
 			name: "invalid JWT via query param",
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/?jwt=not.a.jwt", nil)
-				return r
+				return httptest.NewRequest("GET", "/test/abc?token=not.a.jwt", nil)
 			}(),
 			expectedStatusCode: http.StatusUnauthorized,
 			expectedBody:       "Unauthorized",
@@ -73,8 +72,8 @@ func TestJWTHandling(t *testing.T) {
 		{
 			name: "missing exp claim",
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/", nil)
-				tok := makeToken(jwt.MapClaims{"sub": "1234"}, testSecret)
+				r := httptest.NewRequest("GET", "/test/abc", nil)
+				tok := makeToken(jwt.MapClaims{"sub": "1234", "path": "/test/abc"}, testSecret)
 				r.Header.Add("Authorization", "Bearer "+tok)
 				return r
 			}(),
@@ -82,10 +81,10 @@ func TestJWTHandling(t *testing.T) {
 			expectedBody:       "Unauthorized",
 		},
 		{
-			name: "expired token via header",
+			name: "expired token",
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/", nil)
-				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": pastExp}, testSecret)
+				r := httptest.NewRequest("GET", "/test/abc", nil)
+				tok := makeToken(jwt.MapClaims{"exp": pastExp, "path": "/test/abc"}, testSecret)
 				r.Header.Add("Authorization", "Bearer "+tok)
 				return r
 			}(),
@@ -95,20 +94,54 @@ func TestJWTHandling(t *testing.T) {
 		{
 			name: "wrong secret",
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/", nil)
-				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": futureExp}, "wrong-secret")
+				r := httptest.NewRequest("GET", "/test/abc", nil)
+				tok := makeToken(jwt.MapClaims{"exp": futureExp, "path": "/test/abc"}, "wrong-secret")
 				r.Header.Add("Authorization", "Bearer "+tok)
 				return r
 			}(),
 			expectedStatusCode: http.StatusUnauthorized,
 			expectedBody:       "Unauthorized",
 		},
-		// ── Valid tokens ──────────────────────────────────────────────────────
+		// ── Path claim errors ─────────────────────────────────────────────────
 		{
-			name: "valid token via Authorization header",
+			name: "missing path claim",
 			request: func() *http.Request {
-				r := httptest.NewRequest("GET", "/", nil)
-				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": futureExp}, testSecret)
+				r := httptest.NewRequest("GET", "/test/abc", nil)
+				tok := makeToken(jwt.MapClaims{"exp": futureExp}, testSecret)
+				r.Header.Add("Authorization", "Bearer "+tok)
+				return r
+			}(),
+			expectedStatusCode: http.StatusForbidden,
+			expectedBody:       "path claim missing",
+		},
+		{
+			name: "path mismatch – different path",
+			request: func() *http.Request {
+				r := httptest.NewRequest("GET", "/test/abc", nil)
+				tok := makeToken(jwt.MapClaims{"exp": futureExp, "path": "/other/path"}, testSecret)
+				r.Header.Add("Authorization", "Bearer "+tok)
+				return r
+			}(),
+			expectedStatusCode: http.StatusForbidden,
+			expectedBody:       "request path does not match token path",
+		},
+		{
+			name: "path mismatch – trailing slash",
+			request: func() *http.Request {
+				r := httptest.NewRequest("GET", "/test/abc/", nil)
+				tok := makeToken(jwt.MapClaims{"exp": futureExp, "path": "/test/abc"}, testSecret)
+				r.Header.Add("Authorization", "Bearer "+tok)
+				return r
+			}(),
+			expectedStatusCode: http.StatusForbidden,
+			expectedBody:       "request path does not match token path",
+		},
+		// ── Valid requests ────────────────────────────────────────────────────
+		{
+			name: "valid token with correct path via header",
+			request: func() *http.Request {
+				r := httptest.NewRequest("GET", "/test/abc", nil)
+				tok := makeToken(jwt.MapClaims{"exp": futureExp, "path": "/test/abc"}, testSecret)
 				r.Header.Add("Authorization", "Bearer "+tok)
 				return r
 			}(),
@@ -117,25 +150,23 @@ func TestJWTHandling(t *testing.T) {
 			expectedNextCalled: true,
 		},
 		{
-			name: "valid token via ?jwt= query param",
+			name: "valid token with correct path via ?token= query param",
 			request: func() *http.Request {
-				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": futureExp}, testSecret)
-				r := httptest.NewRequest("GET", "/?jwt="+tok, nil)
-				return r
+				tok := makeToken(jwt.MapClaims{"exp": futureExp, "path": "/test/abc"}, testSecret)
+				return httptest.NewRequest("GET", "/test/abc?token="+tok, nil)
 			}(),
 			expectedStatusCode: http.StatusOK,
 			expectedBody:       "OK",
 			expectedNextCalled: true,
 		},
 		{
-			name: "?jwt= is stripped before forwarding to backend",
+			name: "?token= is stripped before forwarding, other params preserved",
 			request: func() *http.Request {
-				tok := makeToken(jwt.MapClaims{"sub": "1234", "exp": futureExp}, testSecret)
-				r := httptest.NewRequest("GET", "/path?foo=bar&jwt="+tok, nil)
-				return r
+				tok := makeToken(jwt.MapClaims{"exp": futureExp, "path": "/test/abc"}, testSecret)
+				return httptest.NewRequest("GET", "/test/abc?foo=bar&token="+tok, nil)
 			}(),
 			expectedStatusCode: http.StatusOK,
-			expectedBody:       "foo=bar", // backend receives only foo=bar, no jwt=
+			expectedBody:       "foo=bar",
 			expectedNextCalled: true,
 		},
 	}
@@ -144,28 +175,24 @@ func TestJWTHandling(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			actualNextCalled := false
 			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Echo back the raw query string so we can assert stripping.
-				w.Write([]byte(r.URL.RawQuery))
-				if r.URL.RawQuery == "" {
+				actualNextCalled = true
+				// Echo raw query string so we can assert param stripping;
+				// fall back to "OK" when no query string is present.
+				if r.URL.RawQuery != "" {
+					w.Write([]byte(r.URL.RawQuery))
+				} else {
 					w.Write([]byte("OK"))
 				}
-				actualNextCalled = true
 			})
 
-			now := time.Now
-			if test.now != nil {
-				now = test.now
-			}
-
-			handler := NewJWTAuthHandler([]byte(testSecret), now, next)
+			handler := NewJWTAuthHandler([]byte(testSecret), time.Now, next)
 			recorder := httptest.NewRecorder()
-
 			handler.ServeHTTP(recorder, test.request)
 
 			actual := recorder.Result()
 
 			if test.expectedNextCalled != actualNextCalled {
-				t.Errorf("expected next called %v, but got %v", test.expectedNextCalled, actualNextCalled)
+				t.Errorf("expected next called %v, got %v", test.expectedNextCalled, actualNextCalled)
 			}
 			if actual.StatusCode != test.expectedStatusCode {
 				t.Errorf("expected status %v, got %v", test.expectedStatusCode, actual.StatusCode)
